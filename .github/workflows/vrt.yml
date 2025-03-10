@@ -1,0 +1,151 @@
+name: Playwright VRT
+on:
+  deployment_status:
+jobs:
+  playwright:
+    if: github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'preview'
+    name: visual-regression-test
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.51.0-noble
+      options: --user 1001
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Install dependencies
+        run: npm ci
+      - name: Capture Production Screenshots
+        run: npm run playwright:update
+        env:
+          BASE_URL: https://test-mu-kohl-48.vercel.app/
+      - name: Compare Screenshot To Preview
+        run: npm run playwright
+        env:
+          BASE_URL: ${{ github.event.deployment_status.environment_url }}
+      - name: Upload Test Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report
+
+  publish_report:
+    name: Publish Report
+    needs: [playwright]
+    if: github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'preview'
+    runs-on: ubuntu-latest
+    env:
+      HTML_REPORT_URL_PATH: reports/${{ github.run_id }}/${{ github.run_attempt }}
+    outputs:
+      report_url_path: ${{ env.HTML_REPORT_URL_PATH }}
+      test_status: ${{ needs.playwright.result }}
+    steps:
+      - name: Checkout GitHub Pages Branch
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          token: ${{ secrets.PAT }}
+
+      - name: Set Git User
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Download Test Report
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-report
+          path: ${{ env.HTML_REPORT_URL_PATH }}
+
+      - name: Push HTML Report
+        run: |
+          git add .
+          git commit -m "VRT Report: ${{ github.run_id }} (attempt: ${{ github.run_attempt }})"
+          for i in {1..5}; do
+            git pull --rebase
+            git push https://${{ secrets.PAT }}@github.com/${{ github.repository }}.git gh-pages && break || sleep 10
+          done
+
+  notify_slack:
+    name: Notify Slack
+    if: github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'preview'
+    needs: [publish_report]
+    runs-on: ubuntu-latest
+    env:
+      REPORT_URL_PATH: ${{ needs.publish_report.outputs.report_url_path }}
+      TEST_STATUS: ${{ needs.publish_report.outputs.test_status }}
+    steps:
+      - name: Construct Report URL
+        run: echo "REPORT_URL=https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ env.REPORT_URL_PATH }}/index.html" >> $GITHUB_ENV
+
+      - name: Wait for GitHub Pages Deployment
+        run: |
+          echo "Waiting for GitHub Pages deployment..."
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$REPORT_URL")
+            if [ "$STATUS" -eq 200 ]; then
+              echo "GitHub Pages is live!"
+              break
+            fi
+            echo "Not ready yet. Retrying in 10 seconds..."
+            sleep 10
+          done
+
+      - name: Determine Status Message
+        run: |
+          if [ "$TEST_STATUS" == "success" ]; then
+            echo "STATUS_EMOJI=✅" >> $GITHUB_ENV
+            echo "STATUS_TEXT=成功" >> $GITHUB_ENV
+          else
+            echo "STATUS_EMOJI=⚠️" >> $GITHUB_ENV
+            echo "STATUS_TEXT=失敗あり" >> $GITHUB_ENV
+          fi
+
+      - name: Send Slack Notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{
+            \"blocks\": [
+              {
+                \"type\": \"header\",
+                \"text\": {
+                  \"type\": \"plain_text\",
+                  \"text\": \"$STATUS_EMOJI VRT Report 生成完了 - テスト: $STATUS_TEXT\"
+                }
+              },
+              {
+                \"type\": \"section\",
+                \"text\": {
+                  \"type\": \"mrkdwn\",
+                  \"text\": \"*リポジトリ:* ${{ github.repositoryUrl }}\\n*デプロイURL:* ${{ github.event.deployment_status.environment_url }}\"
+                }
+              },
+              {
+                \"type\": \"actions\",
+                \"elements\": [
+                  {
+                    \"type\": \"button\",
+                    \"text\": {
+                      \"type\": \"plain_text\",
+                      \"text\": \"レポートを表示\"
+                    },
+                    \"url\": \"$REPORT_URL\",
+                    \"style\": \"primary\"
+                  },
+                  {
+                    \"type\": \"button\",
+                    \"text\": {
+                      \"type\": \"plain_text\",
+                      \"text\": \"GitHub Actionsの結果を表示\"
+                    },
+                    \"url\": \"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                  }
+                ]
+              }
+            ]
+          }" \
+          "$SLACK_WEBHOOK_URL" || echo "Failed to send Slack notification"
