@@ -19,7 +19,7 @@ jobs:
       - name: Capture Production Screenshots
         run: npm run playwright:update
         env:
-          BASE_URL: https://test-mu-kohl-48.vercel.app/
+          BASE_URL: https://playwright-vrt.vercel.app/
       - name: Compare Screenshot To Preview
         run: npm run playwright
         env:
