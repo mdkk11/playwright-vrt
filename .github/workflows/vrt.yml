@@ -71,7 +71,7 @@ jobs:
   notify_slack:
     name: Notify Slack
     if: github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'preview'
-    needs: [publish_report]
+    needs: [playwright, publish_report]
     runs-on: ubuntu-latest
     env:
       REPORT_URL_PATH: ${{ needs.publish_report.outputs.report_url_path }}
